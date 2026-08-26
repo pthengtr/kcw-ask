@@ -1,0 +1,20 @@
+[Unit]
+Description=PARTS9 read-only MCP (streamable-http on localhost)
+After=network-online.target owui-sql-tool.service
+Wants=network-online.target owui-sql-tool.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hqadmin/projects/ask-chat/mcp
+EnvironmentFile=-/home/hqadmin/projects/ask-chat/mcp/mcp.env
+EnvironmentFile=-/home/hqadmin/open-webui/sql-tool/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=MCP_TRANSPORT=streamable-http
+Environment=MCP_HOST=127.0.0.1
+Environment=MCP_PORT=8092
+ExecStart=/home/hqadmin/projects/ask-chat/.venv/bin/python /home/hqadmin/projects/ask-chat/mcp/sql_server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

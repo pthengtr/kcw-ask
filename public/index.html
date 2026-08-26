@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KCW Ask</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Prompt:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css?v=8" />
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>KCW Ask</h1>
+          <p class="tag" id="modeTag">ค้นหาสินค้า · intent slots → SQL</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <div class="mode-switch" role="tablist" aria-label="โหมด">
+          <button type="button" class="mode-btn active" data-mode="search" id="modeSearch">ค้นหา</button>
+          <button type="button" class="mode-btn" data-mode="ask" id="modeAsk">ถาม (Agent)</button>
+        </div>
+        <span class="pill" id="statusPill">ค้นหาสินค้า</span>
+        <button type="button" id="newChat" class="ghost">แชทใหม่</button>
+      </div>
+    </header>
+
+    <main id="thread" class="thread" aria-live="polite"></main>
+
+    <footer class="composer">
+      <form id="form">
+        <textarea
+          id="input"
+          rows="2"
+          placeholder="ชื่อสินค้า / ขนาด / แบรนด์ หรือ BCODE"
+          autocomplete="off"
+        ></textarea>
+        <button type="submit" id="send">ส่ง</button>
+      </form>
+      <p class="hint" id="hint">Search: slots → PARTS9 SQL · Ask: Agent อุ่นเครื่องตอนเข้าโหมด</p>
+    </footer>
+  </div>
+
+  <div id="loadingOverlay" class="loading-overlay" hidden>
+    <div class="loading-card">
+      <span class="spinner spinner-lg" aria-hidden="true"></span>
+      <p id="loadingText">กำลังประมวลผล…</p>
+    </div>
+  </div>
+
+  <script src="/app.js?v=8"></script>
+</body>
+</html>

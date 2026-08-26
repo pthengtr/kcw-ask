@@ -1,0 +1,9 @@
+node_modules/
+.venv/
+.env
+mcp/mcp.env
+mcp/tunnel.env
+__pycache__/
+*.pyc
+*.log
+kcw-docs

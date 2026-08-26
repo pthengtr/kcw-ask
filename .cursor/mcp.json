@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "parts9-sql": {
+      "command": "/home/hqadmin/projects/ask-chat/.venv/bin/python",
+      "args": ["/home/hqadmin/projects/ask-chat/mcp/sql_server.py"],
+      "env": {
+        "SQL_TOOL_URL": "http://127.0.0.1:8091"
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenAI Secure MCP Tunnel for PARTS9 (ChatGPT)
+After=network-online.target parts9-mcp.service
+Wants=network-online.target parts9-mcp.service
+ConditionPathExists=/home/hqadmin/.local/bin/tunnel-client
+ConditionPathExists=/home/hqadmin/projects/ask-chat/mcp/tunnel.env
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hqadmin/projects/ask-chat/mcp
+EnvironmentFile=/home/hqadmin/projects/ask-chat/mcp/tunnel.env
+ExecStart=/home/hqadmin/projects/ask-chat/mcp/run-tunnel.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

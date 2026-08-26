@@ -1,0 +1,15 @@
+[Unit]
+Description=KCW Ask chat UI (cursor-agent --mode ask)
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hqadmin/projects/ask-chat
+Environment=HOME=/home/hqadmin
+Environment=PATH=/home/hqadmin/.local/bin:/usr/bin:/bin
+ExecStart=/home/hqadmin/projects/ask-chat/start.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
