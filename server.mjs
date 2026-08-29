@@ -1,15 +1,28 @@
 #!/usr/bin/env node
 /**
- * KCW Ask — two modes on :3000
- *  - search: intent slots → flexible PARTS9 ICMAS SQL (local LLM for slots, OpenAI fallback)
- *  - ask: warm cursor-agent --mode ask (started on mode enter, then --resume)
+ * KCW Ask — product search on :3000
+ * intent slots → PARTS9 ICMAS SQL (local LLM for slots)
  */
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
 import { readFileSync, existsSync, createReadStream, statSync } from "node:fs";
 import { join, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import {
+  parseProductQuery,
+  mergeParsedIntoSlots,
+  searchTokensFromSlots,
+  isNumericSearchToken,
+} from "./lib/parse-query.mjs";
+import { scoreAndRankRows } from "./lib/score-rows.mjs";
+import { buildSearchResultPayload, formatColumnHeader } from "./lib/icmas-labels.mjs";
+import {
+  embedConfigured,
+  embedText,
+  loadProductEmbedIndex,
+  blendScores,
+} from "./lib/embed.mjs";
+import { getImageConfig, resolveProductImages } from "./lib/product-images.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const PUBLIC = join(ROOT, "public");
@@ -31,6 +44,7 @@ function loadEnv() {
   loadEnvFile("/home/hqadmin/open-webui/.env", fileEnv);
   loadEnvFile("/home/hqadmin/open-webui/sql-tool/.env", fileEnv, { override: true });
   loadEnvFile(join(ROOT, ".env"), fileEnv, { override: true });
+  loadEnvFile("/home/hqadmin/projects/kcw-api/.env", fileEnv, { override: true });
   if (!fileEnv.OPENAI_API_KEY && fileEnv.OPENAI_API_KEYS) {
     fileEnv.OPENAI_API_KEY = fileEnv.OPENAI_API_KEYS.split(";")[0].trim();
   }
@@ -58,14 +72,21 @@ function loadEnv() {
 const fileEnv = loadEnv();
 const PORT = Number(process.env.PORT || 3000);
 const WORKSPACE = process.env.WORKSPACE || ROOT;
-const DOCS_DIR = process.env.DOCS_DIR || "/home/hqadmin/projects/kcw-docs";
-const AGENT_BIN = fileEnv.ASK_AGENT_BIN || "/home/hqadmin/.local/bin/cursor-agent";
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const OPENAI_MODEL = process.env.ASK_MODEL || "gpt-4o-mini";
 const SLOT_BASE = (process.env.SLOT_LLM_BASE_URL || "").replace(/\/$/, "");
-const SLOT_MODEL = process.env.SLOT_LLM_MODEL || "qwen2.5:32b";
+const SLOT_MODEL = process.env.SLOT_LLM_MODEL || "qwen3.8:27b";
 const SLOT_KEY = process.env.SLOT_LLM_API_KEY || "ollama";
+const SLOT_LLM_ONLY = ["1", "true", "yes", "on"].includes(
+  String(process.env.SLOT_LLM_ONLY || (SLOT_BASE ? "true" : "false")).toLowerCase()
+);
+const SEARCH_RECALL_LIMIT = Number(process.env.SEARCH_RECALL_LIMIT || 100);
+const SEARCH_RESULT_LIMIT = Number(process.env.SEARCH_RESULT_LIMIT || 30);
+const SEARCH_DEBUG = ["1", "true", "yes", "on"].includes(
+  String(process.env.SEARCH_DEBUG || "false").toLowerCase()
+);
+const SEARCH_EMBED_WEIGHT = Number(process.env.SEARCH_EMBED_WEIGHT || 0.35);
 const SQL_URL = (process.env.SQL_TOOL_URL || "http://127.0.0.1:8091").replace(/\/$/, "");
 const SQL_TOKEN = process.env.SQL_TOOL_TOKEN || "";
 const JOB_TIMEOUT_MS = Number(process.env.ASK_JOB_TIMEOUT_MS || 180000);
@@ -96,6 +117,7 @@ const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json",
 };
 
@@ -190,67 +212,30 @@ function rulesSlots(message) {
     pcode_or_mcode: null,
   };
 
-  if (/syp|สาขา|ร้าน/i.test(raw)) slots.site = "syp";
-  if (/hq|สำนักงาน|ออฟฟิศ/i.test(raw)) slots.site = "hq";
+  const parsed = parseProductQuery(raw);
+  mergeParsedIntoSlots(slots, parsed);
 
   const bcode = raw.match(/\b(\d{6,12})\b/);
   if (bcode && /^\d{6,12}$/.test(raw.trim())) {
     slots.intent = "product_by_code";
     slots.bcode = raw.trim();
-    return { slots, source: "rules", complete: true };
+    return { slots, source: "rules+parse", complete: true, parsed };
   }
-  if (bcode) slots.bcode = bcode[1];
-
-  // ICMAS SIZE1/SIZE2/SIZE3 (docs §7) — e.g. ซีล ใน31 นอก46 หนา7 / 31x46x7 / 31*46*7
-  const labeled = {
-    size1: raw.match(/(?:size1|ใน|id|i\.?d\.?)\s*[:=]?\s*(\d+(?:\.\d+)?)/i),
-    size2: raw.match(/(?:size2|นอก|od|o\.?d\.?)\s*[:=]?\s*(\d+(?:\.\d+)?)/i),
-    size3: raw.match(/(?:size3|หนา|สูง|ยาว|width|thick)\s*[:=]?\s*(\d+(?:\.\d+)?)/i),
-  };
-  if (labeled.size1) slots.size1 = labeled.size1[1];
-  if (labeled.size2) slots.size2 = labeled.size2[1];
-  if (labeled.size3) slots.size3 = labeled.size3[1];
-
-  if (!slots.size1 && !slots.size2) {
-    const triple = raw.match(/(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)/i);
-    const pair = raw.match(/(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)/i);
-    if (triple) {
-      slots.size1 = triple[1];
-      slots.size2 = triple[2];
-      slots.size3 = triple[3];
-    } else if (pair) {
-      slots.size1 = pair[1];
-      slots.size2 = pair[2];
-    }
-  }
-
-  for (const [letter, name] of Object.entries(CODE1_MAP)) {
-    if (raw.includes(name)) slots.code1 = letter;
-  }
-
-  let text = raw
-    .replace(/\b(hq|syp|ค้นหา|หา|สินค้า|ขอ|ดู)\b/gi, " ")
-    .replace(/\d{6,12}/g, " ")
-    .replace(/(?:size[123]|ใน|นอก|หนา|สูง|ยาว)\s*[:=]?\s*\d+(?:\.\d+)?/gi, " ")
-    .replace(/\d+(?:\.\d+)?\s*[x×*]\s*\d+(?:\.\d+)?(?:\s*[x×*]\s*\d+(?:\.\d+)?)?/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  slots.text = text || null;
 
   const brandHints = ["PTT", "CRR", "แท้", "แท้ห้าง", "OEM", "TOYOTA", "ISUZU", "HINO"];
   for (const b of brandHints) {
     if (raw.toUpperCase().includes(b.toUpperCase()) || raw.includes(b)) {
-      slots.brand = b;
+      slots.brand = slots.brand || b;
       break;
     }
   }
 
   if (!slots.text && !slots.bcode && !slots.size1 && !slots.brand && !slots.code1) {
-    slots.text = raw;
+    slots.text = parsed.raw || raw;
   }
 
   const complete = Boolean(slots.bcode && slots.intent === "product_by_code");
-  return { slots, source: "rules", complete };
+  return { slots, source: "rules+parse", complete, parsed };
 }
 
 const SLOT_SYSTEM = `คุณแยก intent/slot สำหรับค้นหาสินค้า PARTS9 (ICMAS) เท่านั้น
@@ -320,7 +305,7 @@ async function fillSlotsWithLlm(message, rules) {
       run: () => chatCompletions(SLOT_BASE, SLOT_KEY, SLOT_MODEL, messages, { max_tokens: 350 }),
     });
   }
-  if (OPENAI_KEY) {
+  if (OPENAI_KEY && !SLOT_LLM_ONLY) {
     attempts.push({
       name: "openai",
       run: () =>
@@ -332,6 +317,7 @@ async function fillSlotsWithLlm(message, rules) {
   }
 
   let lastErr;
+  let lastLlmMs = 0;
   for (const a of attempts) {
     const t0 = Date.now();
     try {
@@ -340,21 +326,49 @@ async function fillSlotsWithLlm(message, rules) {
       return { slots, source: a.name, llm_ms: Date.now() - t0 };
     } catch (err) {
       lastErr = err;
+      lastLlmMs = Date.now() - t0;
     }
   }
   return {
     slots: rules.slots,
     source: "rules_only",
-    llm_ms: 0,
+    llm_ms: lastLlmMs,
     warning: String(lastErr?.message || lastErr || ""),
   };
+}
+
+function slotsCompleteEnough(slots) {
+  if (slots.intent === "product_by_code") return true;
+  return Boolean(
+    slots.text ||
+      slots.bcode ||
+      slots.pcode_or_mcode ||
+      slots.code1 ||
+      slots.size1 ||
+      slots.brand ||
+      slots.model
+  );
+}
+
+function hasStructuredFilters(slots) {
+  return Boolean(
+    slots.code1 ||
+      slots.size1 ||
+      slots.size2 ||
+      slots.size3 ||
+      slots.bcode ||
+      slots.category_code ||
+      slots.pcode_or_mcode ||
+      slots.brand ||
+      slots.model
+  );
 }
 
 function buildSqlFromSlots(slots) {
   if (slots.intent === "product_by_code" && slots.bcode) {
     const code = sqlQuote(slots.bcode);
     return {
-      sql: `SELECT TOP 20 BCODE, DESCR, MODEL, BRAND, CODE1, SIZE1, SIZE2, SIZE3, PCODE, MCODE, QTYOH1, PRICE1, LOCATION1, CANCELED
+      sql: `SELECT TOP 20 BCODE, DESCR, MODEL, BRAND, CODE1, SIZE1, SIZE2, SIZE3, PCODE, MCODE, QTYOH2, PRICE1, LOCATION1, CANCELED
 FROM dbo.ICMAS WITH (NOLOCK)
 WHERE BCODE = '${code}'
 ORDER BY BCODE`,
@@ -369,9 +383,12 @@ ORDER BY BCODE`,
     likes.push(`${col} LIKE '%${q}%'`);
   };
 
-  if (slots.text) {
-    pushLike("DESCR", slots.text);
-    pushLike("MODEL", slots.text);
+  const textTokens = searchTokensFromSlots(slots);
+  for (const tok of textTokens) {
+    const q = sqlQuote(tok);
+    likes.push(`DESCR LIKE N'%${q}%'`);
+    likes.push(`MODEL LIKE N'%${q}%'`);
+    likes.push(`BRAND LIKE N'%${q}%'`);
   }
   if (slots.brand) pushLike("BRAND", slots.brand);
   if (slots.model) pushLike("MODEL", slots.model);
@@ -382,7 +399,27 @@ ORDER BY BCODE`,
   }
 
   const where = [`CANCELED = 'N'`];
-  if (likes.length) where.push(`(${likes.join(" OR ")})`);
+  if (textTokens.length) {
+    for (const tok of textTokens) {
+      const q = sqlQuote(tok);
+      const parts = [
+        `DESCR LIKE N'%${q}%'`,
+        `MODEL LIKE N'%${q}%'`,
+        `BRAND LIKE N'%${q}%'`,
+        `PCODE LIKE N'%${q}%'`,
+        `MCODE LIKE N'%${q}%'`,
+        `BCODE LIKE N'%${q}%'`,
+      ];
+      if (isNumericSearchToken(tok)) {
+        for (const col of ["SIZE1", "SIZE2", "SIZE3"]) {
+          parts.push(`LTRIM(RTRIM(CAST(${col} AS nvarchar(50)))) LIKE N'%${q}%'`);
+        }
+      }
+      where.push(`(${parts.join(" OR ")})`);
+    }
+  } else if (likes.length) {
+    where.push(`(${likes.join(" OR ")})`);
+  }
   if (slots.size1 != null && String(slots.size1).trim() !== "") {
     where.push(`LTRIM(RTRIM(CAST(SIZE1 AS nvarchar(50)))) = '${sqlQuote(String(slots.size1).trim())}'`);
   }
@@ -400,35 +437,71 @@ ORDER BY BCODE`,
     where.push(`LEFT(BCODE, 2) = '${cc}'`);
   }
 
+  if (!hasStructuredFilters(slots) && textTokens.length === 0) {
+    return { sql: null };
+  }
+
   if (where.length === 1) {
     return { sql: null };
   }
 
   const primary = sqlQuote(slots.text || slots.brand || slots.model || "");
-  const sql = `SELECT TOP 30 BCODE, DESCR, MODEL, BRAND, CODE1, SIZE1, SIZE2, SIZE3, PCODE, MCODE, QTYOH1, PRICE1, LOCATION1, CANCELED
+  const recall = Math.max(SEARCH_RESULT_LIMIT, Math.min(SEARCH_RECALL_LIMIT, 200));
+  const sql = `SELECT TOP ${recall} BCODE, DESCR, MODEL, BRAND, CODE1, SIZE1, SIZE2, SIZE3, PCODE, MCODE, QTYOH2, PRICE1, LOCATION1, CANCELED
 FROM dbo.ICMAS WITH (NOLOCK)
 WHERE ${where.join("\n  AND ")}
 ORDER BY
-  CASE WHEN DESCR LIKE N'%${primary}%' THEN 0 ELSE 1 END,
+  CASE WHEN LTRIM(RTRIM(BCODE)) = '${primary}' THEN 0
+       WHEN LTRIM(RTRIM(COALESCE(PCODE,''))) = '${primary}' THEN 1
+       WHEN LTRIM(RTRIM(COALESCE(MCODE,''))) = '${primary}' THEN 1
+       WHEN DESCR LIKE N'%${primary}%' THEN 2 ELSE 3 END,
   BCODE`;
   return { sql };
 }
 
-function formatRowsMarkdown(message, site, sql, slots, data) {
+function formatRowsMarkdown(message, site, sql, slots, data, scoreMeta = null) {
   const rows = data.rows || [];
-  const cols = ["BCODE", "DESCR", "MODEL", "BRAND", "CODE1", "SIZE1", "SIZE2", "SIZE3", "QTYOH1", "PRICE1", "LOCATION1"];
+  const keys = [
+    "BCODE",
+    "DESCR",
+    "BRAND",
+    "PCODE",
+    "MCODE",
+    "MODEL",
+    "CODE1",
+    "SIZE1",
+    "SIZE2",
+    "SIZE3",
+    "QTYOH2",
+    "PRICE1",
+    "LOCATION1",
+  ];
+  const code1 = rows[0]?.CODE1;
+  const headers = keys.map((k) => formatColumnHeader(k, code1));
   if (!rows.length) {
     return `ไม่พบสินค้าที่ตรงกับ「${message}」ใน **${site.toUpperCase()}**\n\n## Sources\n- \`local:${site}:PARTS9\`\n\`\`\`sql\n${sql}\n\`\`\`\n\n### slots\n\`\`\`json\n${JSON.stringify(slots, null, 2)}\n\`\`\``;
   }
-  const header = `| ${cols.join(" | ")} |\n| ${cols.map(() => "---").join(" | ")} |`;
+  const header = `| ${headers.join(" | ")} |\n| ${headers.map(() => "---").join(" | ")} |`;
   const body = rows
-    .map((r) => `| ${cols.map((c) => String(r[c] ?? "")).join(" | ")} |`)
+    .map((r) => `| ${keys.map((c) => String(r[c] ?? "")).join(" | ")} |`)
     .join("\n");
-  return `พบ **${rows.length}** รายการ สำหรับ「${message}」(${site.toUpperCase()})\n\n${header}\n${body}\n\n## Sources\n- \`local:${site}:PARTS9\` (ICMAS SIZE1/2/3 per kcw-docs)\n\`\`\`sql\n${sql}\n\`\`\``;
+  let out = `พบ **${rows.length}** รายการ สำหรับ「${message}」(${site.toUpperCase()})\n\n${header}\n${body}\n\n## Sources\n- \`local:${site}:PARTS9\` (ICMAS SIZE1/2/3 per kcw-docs)\n\`\`\`sql\n${sql}\n\`\`\``;
+  if (SEARCH_DEBUG && scoreMeta) {
+    out += `\n\n### debug\n\`\`\`json\n${JSON.stringify(scoreMeta, null, 2)}\n\`\`\``;
+  }
+  return out;
 }
 
 async function runSearchJob(job, message) {
-  const timing = { rules_ms: 0, slot_llm_ms: 0, sql_ms: 0, format_ms: 0, total_ms: 0 };
+  const timing = {
+    rules_ms: 0,
+    slot_llm_ms: 0,
+    sql_ms: 0,
+    score_ms: 0,
+    embed_ms: 0,
+    format_ms: 0,
+    total_ms: 0,
+  };
   const t0 = Date.now();
 
   job.phase = "slots";
@@ -436,10 +509,12 @@ async function runSearchJob(job, message) {
   const rules = rulesSlots(message);
   timing.rules_ms = Date.now() - tRules;
 
-  let filled = { slots: rules.slots, source: "rules", llm_ms: 0 };
-  if (!rules.complete) {
+  let filled = { slots: rules.slots, source: rules.source, llm_ms: 0 };
+  if (!rules.complete && !slotsCompleteEnough(rules.slots)) {
     filled = await fillSlotsWithLlm(message, rules);
     timing.slot_llm_ms = filled.llm_ms || 0;
+  } else if (!rules.complete) {
+    filled = { slots: rules.slots, source: rules.source, llm_ms: 0 };
   }
   const slots = filled.slots;
   job.slots = slots;
@@ -459,192 +534,123 @@ async function runSearchJob(job, message) {
   const tSql = Date.now();
   const site = slots.site === "syp" ? "syp" : "hq";
   const path = site === "syp" ? "/query_syp" : "/query_hq";
-  const data = await sqlFetch(path, { sql, row_limit: 30 });
+  const data = await sqlFetch(path, { sql, row_limit: SEARCH_RECALL_LIMIT });
   timing.sql_ms = Date.now() - tSql;
+
+  job.phase = "score";
+  const tScore = Date.now();
+  const { rows: scoredRows, scores } = scoreAndRankRows(data.rows || [], {
+    query: message,
+    slots,
+    limit: SEARCH_RESULT_LIMIT,
+  });
+  timing.score_ms = Date.now() - tScore;
+
+  let finalRows = scoredRows;
+  let embedMeta = null;
+  const embedIndex = loadProductEmbedIndex();
+  if (embedConfigured() && embedIndex?.items?.length) {
+    job.phase = "embed";
+    const tEmbed = Date.now();
+    try {
+      const queryEmbed = await embedText(message);
+      if (queryEmbed) {
+        const byBcode = new Map(
+          embedIndex.items.map((it) => [String(it.bcode).trim(), it.embedding])
+        );
+        const blended = scoredRows.map((row) => {
+          const hit = scores.find((s) => s.bcode === row.BCODE);
+          const heuristic = hit?.score ?? 0;
+          const emb = byBcode.get(String(row.BCODE || "").trim());
+          const cosine = emb ? cosineFromEmbed(queryEmbed, emb) : 0;
+          return {
+            row,
+            finalScore: blendScores(heuristic, cosine, SEARCH_EMBED_WEIGHT),
+            heuristic,
+            cosine,
+          };
+        });
+        blended.sort(
+          (a, b) => b.finalScore - a.finalScore || String(a.row.BCODE).localeCompare(String(b.row.BCODE))
+        );
+        finalRows = blended.slice(0, SEARCH_RESULT_LIMIT).map((b) => b.row);
+        embedMeta = blended.slice(0, SEARCH_RESULT_LIMIT).map((b) => ({
+          bcode: b.row.BCODE,
+          heuristic: b.heuristic,
+          cosine: Number(b.cosine.toFixed(4)),
+          final: Number(b.finalScore.toFixed(2)),
+        }));
+      }
+    } catch (err) {
+      embedMeta = { error: String(err.message || err) };
+    }
+    timing.embed_ms = Date.now() - tEmbed;
+  }
+
+  job.phase = "images";
+  const imageConfig = getImageConfig();
+  let imageMap = new Map();
+  if (imageConfig.supabaseUrl && finalRows.length) {
+    try {
+      imageMap = await resolveProductImages(
+        finalRows.map((row) => row.BCODE),
+        imageConfig
+      );
+    } catch (err) {
+      console.warn("product image resolve failed:", err);
+    }
+  }
 
   job.phase = "format";
   const tFmt = Date.now();
-  job.result = formatRowsMarkdown(message, site, sql, slots, data);
+  const rankedData = { ...data, rows: finalRows, row_count: finalRows.length };
+  const scoreMeta = SEARCH_DEBUG ? { scores, embed: embedMeta } : null;
+  const searchResults = buildSearchResultPayload(finalRows, {
+    message,
+    site,
+    scores,
+    imageMap,
+  });
+  job.result = formatRowsMarkdown(message, site, sql, slots, rankedData, scoreMeta);
+  job.search_results = searchResults;
   timing.format_ms = Date.now() - tFmt;
   timing.total_ms = Date.now() - t0;
 
   job.status = "done";
   job.phase = "done";
   job.timing = timing;
-  job.meta = { site, sql, row_count: data.row_count, slot_source: filled.source };
+  job.meta = {
+    site,
+    sql,
+    recall_count: data.row_count,
+    row_count: finalRows.length,
+    slot_source: filled.source,
+    scores: SEARCH_DEBUG ? scores : undefined,
+    embed: embedMeta,
+    search_results: searchResults,
+  };
 }
 
-/* ---------------- Ask: warm Cursor agent ---------------- */
-
-class WarmCursorAsk {
-  constructor() {
-    this.sessionId = null;
-    this.warming = null;
-    this.lastError = null;
+function cosineFromEmbed(a, b) {
+  if (!a?.length || !b?.length || a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
   }
-
-  async ensureWarm(job) {
-    if (this.sessionId) return this.sessionId;
-    if (this.warming) return this.warming;
-    this.warming = this._warmup(job);
-    try {
-      this.sessionId = await this.warming;
-      return this.sessionId;
-    } finally {
-      this.warming = null;
-    }
-  }
-
-  _runAgent(args, onLine) {
-    return new Promise((resolve, reject) => {
-      const child = spawn(AGENT_BIN, args, {
-        cwd: WORKSPACE,
-        env: { ...process.env, NO_OPEN_BROWSER: "1", CURSOR_AGENT: undefined },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let buf = "";
-      let err = "";
-      let sessionId = null;
-      let resultText = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk) => {
-        buf += chunk;
-        const lines = buf.split("\n");
-        buf = lines.pop() || "";
-        for (const line of lines) {
-          const t = line.trim();
-          if (!t) continue;
-          let evt;
-          try {
-            evt = JSON.parse(t);
-          } catch {
-            continue;
-          }
-          if (evt.session_id) sessionId = evt.session_id;
-          if (evt.type === "result" && evt.result) resultText = evt.result;
-          if (onLine) onLine(evt);
-        }
-      });
-      child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (c) => {
-        err += c;
-      });
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (buf.trim()) {
-          try {
-            const evt = JSON.parse(buf.trim());
-            if (evt.session_id) sessionId = evt.session_id;
-            if (evt.type === "result" && evt.result) resultText = evt.result;
-          } catch {
-            /* ignore */
-          }
-        }
-        if (code !== 0 && !resultText) {
-          reject(new Error(err.trim() || `cursor-agent exited ${code}`));
-          return;
-        }
-        resolve({ sessionId, resultText });
-      });
-    });
-  }
-
-  async _warmup(job) {
-    if (job) job.phase = "warmup";
-    const args = [
-      "--mode",
-      "ask",
-      "-p",
-      "--output-format",
-      "stream-json",
-      "--model",
-      process.env.ASK_CURSOR_MODEL || "auto",
-      "--trust",
-      "--approve-mcps",
-      "--workspace",
-      WORKSPACE,
-      "--add-dir",
-      DOCS_DIR,
-      "Reply with exactly: ready",
-    ];
-    const { sessionId } = await this._runAgent(args);
-    if (!sessionId) throw new Error("warmup ได้ไม่มี session_id");
-    return sessionId;
-  }
-
-  reset() {
-    this.sessionId = null;
-    this.lastError = null;
-  }
-
-  async ask(message, job) {
-    const t0 = Date.now();
-    let warm_ms = 0;
-    if (!this.sessionId) {
-      const tw = Date.now();
-      await this.ensureWarm(job);
-      warm_ms = Date.now() - tw;
-    }
-    if (job) job.phase = "agent";
-    const prompt = [
-      "You are KCW Agent (ask mode) (read-only). Prefer live PARTS9 via MCP parts9-sql (query_hq/query_syp).",
-      "Use kcw-docs for schema meanings (ICMAS BCODE/CODE1/PCODE/MCODE).",
-      "Answer in Thai. End with ## Sources.",
-      "",
-      message,
-    ].join("\n");
-
-    const args = [
-      "--mode",
-      "ask",
-      "-p",
-      "--output-format",
-      "stream-json",
-      "--stream-partial-output",
-      "--model",
-      process.env.ASK_CURSOR_MODEL || "auto",
-      "--trust",
-      "--approve-mcps",
-      "--workspace",
-      WORKSPACE,
-      "--add-dir",
-      DOCS_DIR,
-      "--resume",
-      this.sessionId,
-      prompt,
-    ];
-
-    const ta = Date.now();
-    try {
-      const { sessionId, resultText } = await this._runAgent(args, (evt) => {
-        if (job && evt.type === "tool_call") job.phase = "tools";
-        if (job && evt.type === "assistant") job.phase = "generating";
-      });
-      if (sessionId) this.sessionId = sessionId;
-      return {
-        text: resultText,
-        timing: {
-          warm_ms,
-          agent_ms: Date.now() - ta,
-          total_ms: Date.now() - t0,
-        },
-      };
-    } catch (err) {
-      // session may be stale — reset and retry once with fresh warm
-      this.sessionId = null;
-      throw err;
-    }
-  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom ? dot / denom : 0;
 }
 
-const warmAsk = new WarmCursorAsk();
-
-function startJob({ mode, message, chatId }) {
+function startJob({ message, chatId }) {
   const jobId = randomUUID();
   const job = {
     id: jobId,
     chatId: chatId || randomUUID(),
-    mode,
+    mode: "search",
     status: "running",
     phase: "starting",
     result: "",
@@ -666,15 +672,7 @@ function startJob({ mode, message, chatId }) {
 
   (async () => {
     try {
-      if (mode === "ask") {
-        const out = await warmAsk.ask(message, job);
-        job.result = out.text || "(ว่าง)";
-        job.timing = out.timing;
-        job.status = "done";
-        job.phase = "done";
-      } else {
-        await runSearchJob(job, message);
-      }
+      await runSearchJob(job, message);
     } catch (err) {
       if (job.status === "running") {
         job.status = "error";
@@ -710,46 +708,29 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/health") {
       return sendJson(res, 200, {
         status: "ok",
-        modes: ["search", "ask"],
-        slot_llm: SLOT_BASE ? { base: SLOT_BASE, model: SLOT_MODEL } : null,
-        openai_fallback: Boolean(OPENAI_KEY),
-        ask_warm: Boolean(warmAsk.sessionId),
+        mode: "search",
+        slot_llm: SLOT_BASE ? { base: SLOT_BASE, model: SLOT_MODEL, only: SLOT_LLM_ONLY } : null,
+        embed_llm: embedConfigured()
+          ? { model: process.env.EMBED_LLM_MODEL || "bge-m3", index: Boolean(loadProductEmbedIndex()) }
+          : null,
+        search: { recall: SEARCH_RECALL_LIMIT, result: SEARCH_RESULT_LIMIT, debug: SEARCH_DEBUG },
+        openai_fallback: Boolean(OPENAI_KEY) && !SLOT_LLM_ONLY,
         sql: SQL_URL,
       });
-    }
-
-    if (req.method === "POST" && url.pathname === "/api/ask/warmup") {
-      try {
-        const t0 = Date.now();
-        const sid = await warmAsk.ensureWarm();
-        return sendJson(res, 200, {
-          ok: true,
-          sessionId: sid,
-          warm_ms: Date.now() - t0,
-        });
-      } catch (err) {
-        return sendJson(res, 500, { ok: false, error: String(err.message || err) });
-      }
-    }
-
-    if (req.method === "POST" && url.pathname === "/api/ask/reset") {
-      warmAsk.reset();
-      return sendJson(res, 200, { ok: true });
     }
 
     if (req.method === "POST" && url.pathname === "/api/chat/start") {
       const body = await readBody(req);
       const message = String(body.message || "").trim();
-      const mode = body.mode === "ask" ? "ask" : "search";
       if (!message) return sendJson(res, 400, { error: "กรุณาพิมพ์ข้อความ" });
       const chatId = String(body.chatId || randomUUID());
-      const job = startJob({ mode, message, chatId });
-      console.log(`job ${job.id} mode=${mode} msg=${message.slice(0, 60)}`);
+      const job = startJob({ message, chatId });
+      console.log(`job ${job.id} msg=${message.slice(0, 60)}`);
       return sendJson(res, 200, {
         ok: true,
         jobId: job.id,
         chatId,
-        mode,
+        mode: "search",
         status: job.status,
       });
     }
@@ -772,6 +753,7 @@ const server = createServer(async (req, res) => {
         slots: job.slots,
         slot_source: job.slot_source,
         meta: job.meta || null,
+        search_results: job.search_results || job.meta?.search_results || null,
       });
     }
 
@@ -788,7 +770,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    `KCW dual-mode :${PORT} search(slots→SQL) ask(warm agent) localSlots=${SLOT_BASE || "off"}`
-  );
+  console.log(`KCW search :${PORT} slots→SQL localSlots=${SLOT_BASE || "off"}`);
 });
