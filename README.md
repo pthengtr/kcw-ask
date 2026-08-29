@@ -11,6 +11,7 @@ Sibling **HQ service** to kcw-api (worker, Tiger Pay, stock-check, etc.) but a *
 | Piece | Detail |
 |-------|--------|
 | Web UI | `http://<host>:3000` — **search** (intent slots → ICMAS SQL) and **ask** (cursor-agent) |
+| Search docs | [`docs/search.md`](docs/search.md) — ACODE short names, sizes, oil queries, config |
 | Agent rules | `ASK.md` |
 | SQL | Local read-only tool on `:8091` (`owui-sql-tool`) |
 | Docs | Symlink `kcw-docs` → `~/projects/kcw-docs` |

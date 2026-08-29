@@ -23,6 +23,7 @@ import {
   blendScores,
 } from "./lib/embed.mjs";
 import { getImageConfig, resolveProductImages } from "./lib/product-images.mjs";
+import { applyShortNameHints, tokenMatchSqlParts } from "./lib/icmas-short-names.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const PUBLIC = join(ROOT, "public");
@@ -384,6 +385,9 @@ ORDER BY BCODE`,
   };
 
   const textTokens = searchTokensFromSlots(slots);
+
+  const tokenMatchParts = (tok) => tokenMatchSqlParts(tok, sqlQuote);
+
   for (const tok of textTokens) {
     const q = sqlQuote(tok);
     likes.push(`DESCR LIKE N'%${q}%'`);
@@ -401,16 +405,9 @@ ORDER BY BCODE`,
   const where = [`CANCELED = 'N'`];
   if (textTokens.length) {
     for (const tok of textTokens) {
-      const q = sqlQuote(tok);
-      const parts = [
-        `DESCR LIKE N'%${q}%'`,
-        `MODEL LIKE N'%${q}%'`,
-        `BRAND LIKE N'%${q}%'`,
-        `PCODE LIKE N'%${q}%'`,
-        `MCODE LIKE N'%${q}%'`,
-        `BCODE LIKE N'%${q}%'`,
-      ];
+      const parts = tokenMatchParts(tok);
       if (isNumericSearchToken(tok)) {
+        const q = sqlQuote(tok);
         for (const col of ["SIZE1", "SIZE2", "SIZE3"]) {
           parts.push(`LTRIM(RTRIM(CAST(${col} AS nvarchar(50)))) LIKE N'%${q}%'`);
         }
@@ -517,6 +514,7 @@ async function runSearchJob(job, message) {
     filled = { slots: rules.slots, source: rules.source, llm_ms: 0 };
   }
   const slots = filled.slots;
+  applyShortNameHints(slots);
   job.slots = slots;
   job.slot_source = filled.source;
 
