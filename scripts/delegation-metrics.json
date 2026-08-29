@@ -1,0 +1,32 @@
+{
+  "build": "kcw-ask-hybrid-search",
+  "rounds": [
+    {
+      "id": "hybrid-search",
+      "completed_at": "2026-08-29T12:15:00+07:00",
+      "tasks": [
+        { "id": "parse-query", "delegated": true, "estimated_inline_tokens": 100000, "cursor_tokens": 8000 },
+        { "id": "score-rows-embed", "delegated": true, "estimated_inline_tokens": 90000, "cursor_tokens": 5000 },
+        { "id": "server-wiring", "delegated": false, "estimated_inline_tokens": 15000, "cursor_tokens": 15000 }
+      ],
+      "summary": { "estimated_inline_total": 205000, "cursor_actual_total": 28000, "tokens_saved": 177000, "savings_pct": 86 }
+    },
+    {
+      "id": "mobile-ui-thai-labels",
+      "completed_at": "2026-08-29T12:25:00+07:00",
+      "tasks": [
+        { "id": "icmas-labels", "delegated": true, "model": "qwen3-coder:30b", "estimated_inline_tokens": 35000, "cursor_tokens": 4000 },
+        { "id": "search-render", "delegated": true, "model": "qwen3-coder:30b", "estimated_inline_tokens": 40000, "cursor_tokens": 5000 },
+        { "id": "mobile-css-app", "delegated": false, "estimated_inline_tokens": 25000, "cursor_tokens": 12000 },
+        { "id": "search-results-api", "delegated": false, "estimated_inline_tokens": 8000, "cursor_tokens": 8000 }
+      ],
+      "summary": { "estimated_inline_total": 108000, "cursor_actual_total": 29000, "tokens_saved": 79000, "savings_pct": 73 }
+    }
+  ],
+  "summary": {
+    "estimated_inline_total": 313000,
+    "cursor_actual_total": 57000,
+    "tokens_saved": 256000,
+    "savings_pct": 82
+  }
+}

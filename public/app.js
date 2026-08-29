@@ -1,3 +1,5 @@
+import { renderSearchResults } from "./search-render.mjs";
+
 (() => {
   const thread = document.getElementById("thread");
   const form = document.getElementById("form");
@@ -7,10 +9,9 @@
   const statusPill = document.getElementById("statusPill");
   const overlay = document.getElementById("loadingOverlay");
   const loadingText = document.getElementById("loadingText");
-  const modeTag = document.getElementById("modeTag");
   const hint = document.getElementById("hint");
-  const modeSearch = document.getElementById("modeSearch");
-  const modeAsk = document.getElementById("modeAsk");
+
+  const prefersCards = () => window.matchMedia("(max-width: 768px)").matches;
 
   function uuid() {
     if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
@@ -23,8 +24,6 @@
 
   let chatId = uuid();
   let busy = false;
-  let mode = "search"; // search | ask
-  let askWarm = false;
 
   const PHASE_TH = {
     starting: "กำลังเริ่มต้น…",
@@ -32,93 +31,38 @@
     sql: "กำลังค้น SQL…",
     "sql:hq": "กำลังค้น HQ…",
     "sql:syp": "กำลังค้น SYP…",
+    score: "กำลังจัดอันดับ…",
+    embed: "กำลังจัดอันดับ semantic…",
+    images: "กำลังโหลดรูปสินค้า…",
     format: "กำลังจัดตาราง…",
-    warmup: "กำลังอุ่น Agent…",
-    agent: "Agent กำลังตอบ…",
-    tools: "Agent ใช้เครื่องมือ…",
-    generating: "กำลังสร้างคำตอบ…",
     done: "เสร็จแล้ว",
     error: "เกิดข้อผิดพลาด",
     timeout: "หมดเวลา",
   };
 
   function showEmpty() {
-    if (mode === "ask") {
-      thread.innerHTML = `
-        <div class="empty">
-          <strong>โหมดถาม (Agent)</strong><br />
-          อุ่นเครื่องตอนเข้าโหมดนี้ — คุยต่อในเซสชันเดิมได้ (ช้ากว่าค้นหา แต่ยืดหยุ่นกว่า)
-        </div>`;
-    } else {
-      thread.innerHTML = `
-        <div class="empty">
-          <strong>โหมดค้นหาสินค้า</strong><br />
-          ฟรีเท็กซ์ → intent slots → SQL PARTS9 (เช่น ฝาวาล์ว 18 ลิตร PTT)
-        </div>`;
-    }
+    thread.innerHTML = `
+      <div class="empty">
+        <strong>ค้นหาสินค้า</strong><br />
+        พิมพ์ชื่อ ขนาด ยี่ห้อ หรือรหัสสินค้า
+        <div class="empty-chips" aria-hidden="true">
+          <span>ซีล 31×46×7</span>
+          <span>ลูกปืน 6207</span>
+          <span>pcode:90915-YZZD1</span>
+        </div>
+      </div>`;
   }
-
-  function applyModeChrome() {
-    modeSearch.classList.toggle("active", mode === "search");
-    modeAsk.classList.toggle("active", mode === "ask");
-    statusPill.textContent = mode === "ask" ? (askWarm ? "Agent พร้อม" : "Agent") : "ค้นหาสินค้า";
-    modeTag.textContent =
-      mode === "ask"
-        ? "ถาม · Agent (warm session)"
-        : "ค้นหา · intent slots → SQL";
-    hint.textContent =
-      mode === "ask"
-        ? "Ask: Agent อุ่นตอนเข้าโหมด · ข้อความถัดไปใช้ session เดิม"
-        : "Search: slots (local/OpenAI) → SQL · ตารางจากโค้ด (เร็ว)";
-    input.placeholder =
-      mode === "ask"
-        ? "ถามอะไรก็ได้เกี่ยวกับ PARTS9 / เอกสาร…"
-        : "ชื่อสินค้า / ขนาด / แบรนด์ หรือ BCODE";
-    showEmpty();
-  }
-
-  async function warmupAsk() {
-    statusPill.innerHTML = `<span class="spinner spinner-sm" aria-hidden="true"></span> อุ่น Agent…`;
-    modeAsk.disabled = true;
-    try {
-      const res = await fetch("/api/ask/warmup", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || "warmup failed");
-      askWarm = true;
-      statusPill.textContent = `Agent พร้อม · ${data.warm_ms} ms`;
-    } catch (err) {
-      askWarm = false;
-      statusPill.textContent = "อุ่นไม่สำเร็จ";
-      addMessage("assistant", `อุ่น Agent ไม่สำเร็จ: ${err.message}`);
-    } finally {
-      modeAsk.disabled = false;
-    }
-  }
-
-  async function setMode(next) {
-    if (busy || next === mode) return;
-    mode = next;
-    chatId = uuid();
-    applyModeChrome();
-    if (mode === "ask" && !askWarm) await warmupAsk();
-  }
-
-  modeSearch.addEventListener("click", () => setMode("search"));
-  modeAsk.addEventListener("click", () => setMode("ask"));
 
   showEmpty();
-  applyModeChrome();
 
   function setBusy(v, phase) {
     busy = v;
     sendBtn.disabled = v;
-    modeSearch.disabled = v;
-    modeAsk.disabled = v;
-    const idleLabel = mode === "ask" ? (askWarm ? "Agent พร้อม" : "Agent") : "ค้นหาสินค้า";
     statusPill.innerHTML = v
       ? `<span class="spinner spinner-sm" aria-hidden="true"></span> ${PHASE_TH[phase] || "กำลังทำงาน…"}`
-      : idleLabel;
+      : "ค้นหาสินค้า";
     statusPill.classList.toggle("busy", v);
+    document.body.classList.toggle("is-busy", v);
     if (overlay) {
       overlay.hidden = !v;
       if (loadingText) loadingText.textContent = PHASE_TH[phase] || "กำลังประมวลผล…";
@@ -136,71 +80,15 @@
       .replace(/"/g, "&quot;");
   }
 
-  function renderMarkdown(src) {
-    let text = String(src || "").replace(/\r\n/g, "\n");
-    const blocks = [];
-    text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-      const i = blocks.length;
-      blocks.push(
-        `<pre><code class="language-${escapeHtml(lang)}">${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`
-      );
-      return `\u0000BLOCK${i}\u0000`;
-    });
-    const lines = text.split("\n");
-    const out = [];
-    let listType = null;
-    const closeList = () => {
-      if (listType) {
-        out.push(listType === "ol" ? "</ol>" : "</ul>");
-        listType = null;
-      }
-    };
-    const inline = (s) => {
-      let t = escapeHtml(s);
-      t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
-      t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-      t = t.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-      return t;
-    };
-    for (const line of lines) {
-      const fence = line.match(/^\u0000BLOCK(\d+)\u0000$/);
-      if (fence) {
-        closeList();
-        out.push(blocks[Number(fence[1])]);
-        continue;
-      }
-      if (/^\|/.test(line) && /\|/.test(line.slice(1))) {
-        // keep tables as pre-formatted block groups — simple: escape as paragraph with monospace via pre if separator
-      }
-      const h = line.match(/^(#{1,3})\s+(.*)$/);
-      if (h) {
-        closeList();
-        out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`);
-        continue;
-      }
-      const ul = line.match(/^[-*]\s+(.*)$/);
-      if (ul) {
-        if (listType !== "ul") {
-          closeList();
-          out.push("<ul>");
-          listType = "ul";
-        }
-        out.push(`<li>${inline(ul[1])}</li>`);
-        continue;
-      }
-      if (!line.trim()) {
-        closeList();
-        continue;
-      }
-      closeList();
-      if (line.trim().startsWith("|")) {
-        out.push(`<pre class="table-line">${escapeHtml(line)}</pre>`);
-      } else {
-        out.push(`<p>${inline(line)}</p>`);
-      }
+  function renderAssistantContent(data) {
+    if (data.search_results) {
+      const payload = data.search_results;
+      return `<div class="search-results${prefersCards() ? " mobile-cards" : ""}">${renderSearchResults({
+        ...payload,
+        scores: data.meta?.scores,
+      })}</div>`;
     }
-    closeList();
-    return out.join("\n");
+    return `<p>${escapeHtml(data.result || "(ว่าง)")}</p>`;
   }
 
   function addMessage(role, text) {
@@ -208,13 +96,12 @@
     const el = document.createElement("article");
     el.className = `msg ${role}`;
     el.innerHTML = `
-      <div class="role">${role === "user" ? "คุณ" : mode === "ask" ? "Agent" : "KCW Search"}</div>
+      <div class="role">${role === "user" ? "คุณ" : "KCW Search"}</div>
       <div class="bubble"></div>
       <div class="meta-row"></div>
     `;
     const bubble = el.querySelector(".bubble");
-    if (role === "user") bubble.textContent = text;
-    else bubble.innerHTML = renderMarkdown(text || "");
+    bubble.textContent = role === "user" ? text : "";
     thread.appendChild(el);
     thread.scrollTop = thread.scrollHeight;
     return el;
@@ -224,25 +111,20 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  function formatTiming(t, modeName, slotSource) {
+  function formatTiming(t, slotSource, meta) {
     if (!t) return "";
-    if (modeName === "ask") {
-      return [
-        t.warm_ms ? `อุ่น ${t.warm_ms} ms` : null,
-        t.agent_ms != null ? `Agent ${t.agent_ms} ms` : null,
-        t.total_ms != null ? `รวม ${t.total_ms} ms` : null,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-    }
-    return [
-      t.slot_llm_ms != null ? `slots ${t.slot_llm_ms} ms${slotSource ? ` (${slotSource})` : ""}` : null,
+    const parts = [
+      t.rules_ms != null ? `rules ${t.rules_ms} ms` : null,
+      t.slot_llm_ms != null && t.slot_llm_ms > 0 ? `slots ${t.slot_llm_ms} ms (${slotSource})` : slotSource || null,
       t.sql_ms != null ? `SQL ${t.sql_ms} ms` : null,
-      t.format_ms != null ? `format ${t.format_ms} ms` : null,
+      t.score_ms != null ? `score ${t.score_ms} ms` : null,
+      t.embed_ms != null && t.embed_ms > 0 ? `embed ${t.embed_ms} ms` : null,
       t.total_ms != null ? `รวม ${t.total_ms} ms` : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
+    ].filter(Boolean);
+    if (meta?.recall_count != null) {
+      parts.push(`${meta.recall_count}→${meta.row_count ?? "?"}`);
+    }
+    return parts.join(" · ");
   }
 
   async function send(message) {
@@ -258,7 +140,7 @@
       const startRes = await fetch("/api/chat/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId, message, mode }),
+        body: JSON.stringify({ chatId, message }),
       });
       const startBody = await startRes.json().catch(() => ({}));
       if (!startRes.ok) throw new Error(startBody.error || `HTTP ${startRes.status}`);
@@ -267,7 +149,7 @@
       const deadline = Date.now() + 180000;
 
       while (Date.now() < deadline) {
-        await sleep(mode === "ask" ? 1500 : 400);
+        await sleep(400);
         const poll = await fetch(`/api/chat/job/${encodeURIComponent(jobId)}`);
         const data = await poll.json().catch(() => ({}));
         if (!poll.ok) throw new Error(data.error || `poll ${poll.status}`);
@@ -277,11 +159,8 @@
         bubble.innerHTML = `<div class="inline-loading"><span class="spinner"></span><span>${escapeHtml(label)}${escapeHtml(elapsed)}</span></div>`;
 
         if (data.status === "done") {
-          const text = data.result || "(ว่าง)";
-          bubble.innerHTML = renderMarkdown(text);
-          if (!bubble.textContent.trim()) bubble.textContent = text;
-          meta.textContent = formatTiming(data.timing, mode, data.slot_source);
-          if (mode === "ask") askWarm = true;
+          bubble.innerHTML = renderAssistantContent(data);
+          meta.textContent = formatTiming(data.timing, data.slot_source, data.meta);
           break;
         }
         if (data.status === "error") throw new Error(data.error || "งานล้มเหลว");
@@ -310,16 +189,16 @@
     }
   });
 
-  newChatBtn.addEventListener("click", async () => {
+  thread.addEventListener("click", (e) => {
+    const chip = e.target.closest(".empty-chips span");
+    if (!chip || busy) return;
+    input.value = chip.textContent.trim();
+    input.focus();
+  });
+
+  newChatBtn.addEventListener("click", () => {
     if (busy) return;
     chatId = uuid();
-    if (mode === "ask") {
-      await fetch("/api/ask/reset", { method: "POST" });
-      askWarm = false;
-      applyModeChrome();
-      await warmupAsk();
-    } else {
-      showEmpty();
-    }
+    showEmpty();
   });
 })();
