@@ -29,6 +29,7 @@ function loadEnvFile(path) {
 }
 
 loadEnvFile(join(ROOT, ".env"));
+loadEnvFile("/home/hqadmin/projects/kcw-api/.env");
 const SQL_URL = (process.env.SQL_TOOL_URL || "http://127.0.0.1:8091").replace(/\/$/, "");
 const SQL_TOKEN = process.env.SQL_TOOL_TOKEN || "";
 const BATCH = Number(process.env.PRODUCT_EMBED_BATCH || 500);
@@ -67,7 +68,11 @@ async function sqlFetch(path, sql, rowLimit) {
 
 async function main() {
   if (!process.env.EMBED_LLM_BASE_URL) {
-    console.error("EMBED_LLM_BASE_URL not set — pull bge-m3 on Spark and configure .env");
+    console.error("EMBED_LLM_BASE_URL not set — configure .env");
+    process.exit(1);
+  }
+  if (!process.env.EMBED_LLM_API_KEY && !process.env.OPENAI_API_KEY) {
+    console.error("Set OPENAI_API_KEY (kcw-api/.env) or EMBED_LLM_API_KEY");
     process.exit(1);
   }
 

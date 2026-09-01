@@ -122,6 +122,7 @@ function normalizeRow(row, scores) {
     size1: rowValue(row, "SIZE1"),
     size2: rowValue(row, "SIZE2"),
     size3: rowValue(row, "SIZE3"),
+    sizeDisplay: row.sizeDisplay ?? "",
     qty: rowValue(row, "QTYOH2") ?? rowValue(row, "QTYOH1"),
     price: rowValue(row, "PRICE1"),
     location: rowValue(row, "LOCATION1"),
@@ -170,9 +171,13 @@ function renderCard(item, globalColumns) {
           item.code1Th ? `${item.code1} · ${item.code1Th}` : item.code1
         )
       : "",
-    chip(labelFor("SIZE1", code1, cols), item.size1),
-    chip(labelFor("SIZE2", code1, cols), item.size2),
-    chip(labelFor("SIZE3", code1, cols), item.size3),
+    item.sizeDisplay
+      ? chip("ขนาด", item.sizeDisplay)
+      : [
+          chip(labelFor("SIZE1", code1, cols), item.size1),
+          chip(labelFor("SIZE2", code1, cols), item.size2),
+          chip(labelFor("SIZE3", code1, cols), item.size3),
+        ].join(""),
   ]
     .filter(Boolean)
     .join("");
