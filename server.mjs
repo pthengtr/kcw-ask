@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * KCW Ask — product search on :3000
- * intent slots → PARTS9 ICMAS SQL (local LLM for slots)
+ * intent slots → PARTS9 ICMAS SQL (OpenAI for slot fill)
  */
 import { createServer } from "node:http";
 import { readFileSync, existsSync, createReadStream, statSync } from "node:fs";
@@ -15,7 +15,7 @@ import {
   isNumericSearchToken,
 } from "./lib/parse-query.mjs";
 import { scoreAndRankRows } from "./lib/score-rows.mjs";
-import { buildSearchResultPayload, formatColumnHeader } from "./lib/icmas-labels.mjs";
+import { buildSearchResultPayload, formatSizesCompact } from "./lib/icmas-labels.mjs";
 import {
   embedConfigured,
   embedText,
@@ -77,8 +77,8 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const OPENAI_MODEL = process.env.ASK_MODEL || "gpt-4o-mini";
 const SLOT_BASE = (process.env.SLOT_LLM_BASE_URL || "").replace(/\/$/, "");
-const SLOT_MODEL = process.env.SLOT_LLM_MODEL || "qwen3.8:27b";
-const SLOT_KEY = process.env.SLOT_LLM_API_KEY || "ollama";
+const SLOT_MODEL = process.env.SLOT_LLM_MODEL || OPENAI_MODEL;
+const SLOT_KEY = process.env.SLOT_LLM_API_KEY || OPENAI_KEY;
 const SLOT_LLM_ONLY = ["1", "true", "yes", "on"].includes(
   String(process.env.SLOT_LLM_ONLY || (SLOT_BASE ? "true" : "false")).toLowerCase()
 );
@@ -466,21 +466,38 @@ function formatRowsMarkdown(message, site, sql, slots, data, scoreMeta = null) {
     "MCODE",
     "MODEL",
     "CODE1",
-    "SIZE1",
-    "SIZE2",
-    "SIZE3",
+    "SIZES",
     "QTYOH2",
     "PRICE1",
     "LOCATION1",
   ];
-  const code1 = rows[0]?.CODE1;
-  const headers = keys.map((k) => formatColumnHeader(k, code1));
+  const headers = [
+    "รหัสสินค้า",
+    "ชื่อสินค้า",
+    "ยี่ห้อ",
+    "เบอร์แท้",
+    "เบอร์โรงงาน",
+    "รุ่น/แบบ",
+    "ประเภท",
+    "ขนาด",
+    "คงเหลือ",
+    "ราคา1",
+    "ที่เก็บ",
+  ];
   if (!rows.length) {
     return `ไม่พบสินค้าที่ตรงกับ「${message}」ใน **${site.toUpperCase()}**\n\n## Sources\n- \`local:${site}:PARTS9\`\n\`\`\`sql\n${sql}\n\`\`\`\n\n### slots\n\`\`\`json\n${JSON.stringify(slots, null, 2)}\n\`\`\``;
   }
   const header = `| ${headers.join(" | ")} |\n| ${headers.map(() => "---").join(" | ")} |`;
   const body = rows
-    .map((r) => `| ${keys.map((c) => String(r[c] ?? "")).join(" | ")} |`)
+    .map((r) => {
+      const cells = keys.map((c) => {
+        if (c === "SIZES") {
+          return formatSizesCompact(r.CODE1, r.SIZE1, r.SIZE2, r.SIZE3);
+        }
+        return String(r[c] ?? "");
+      });
+      return `| ${cells.join(" | ")} |`;
+    })
     .join("\n");
   let out = `พบ **${rows.length}** รายการ สำหรับ「${message}」(${site.toUpperCase()})\n\n${header}\n${body}\n\n## Sources\n- \`local:${site}:PARTS9\` (ICMAS SIZE1/2/3 per kcw-docs)\n\`\`\`sql\n${sql}\n\`\`\``;
   if (SEARCH_DEBUG && scoreMeta) {
